@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>NeuroLens — mesh preview</title>
+  <script type="module" src="https://unpkg.com/@google/model-viewer@3.5.0/dist/model-viewer.min.js"></script>
+  <style>
+    body { margin: 0; font-family: system-ui, sans-serif; background: #111; color: #ddd; }
+    header { padding: 0.75rem 1rem; background: #1a1a1a; border-bottom: 1px solid #333; }
+    model-viewer { width: 100vw; height: calc(100vh - 52px); background: #0d0d0d; }
+    code { background: #2a2a2a; padding: 0.1em 0.35em; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <header>
+    Pipeline mesh preview — expects <code>/outputs/mesh/brain.glb</code> (run <code>pipeline/process_subject.py</code> first).
+  </header>
+  <model-viewer
+    src="/outputs/mesh/brain.glb"
+    alt="Brain mesh"
+    camera-controls
+    touch-action="pan-y"
+    shadow-intensity="1"
+    exposure="1"
+    environment-image="neutral"
+  ></model-viewer>
+</body>
+</html>

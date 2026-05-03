@@ -1,0 +1,8 @@
+# NeuroLens VR — pipeline + dev server (see NeuroLens Context docs)
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+nibabel>=5.2.0
+numpy>=1.26.0
+pillow>=10.0.0
+trimesh[easy]>=4.5.0
+scikit-image>=0.24.0

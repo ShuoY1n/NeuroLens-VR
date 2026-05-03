@@ -1,18 +1,28 @@
-NeuroLens Context/
-
+# Python
 __pycache__/
 *.py[cod]
 .venv/
 venv/
 .env
 *.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
+# Generated pipeline output
 outputs/
-data/*.nii
-data/*.nii.gz
+
+# Large imaging (OASIS NIfTI under Dataset/ and elsewhere)
 *.nii
 *.nii.gz
+data/*.nii
+data/*.nii.gz
 
+# OS / archives
 .DS_Store
 Thumbs.db
+._*
 
+NeuroLens Context/
+
+Dataset/
