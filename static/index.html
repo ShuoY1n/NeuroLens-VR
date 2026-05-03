@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>NeuroLens VR — dev</title>
+  <style>
+    body {
+      margin: 0;
+      font-family: system-ui, sans-serif;
+      background: #111;
+      color: #ddd;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    main {
+      padding: 2rem;
+      max-width: 28rem;
+      border: 1px solid #333;
+      border-radius: 8px;
+      background: #1a1a1a;
+    }
+    h1 { font-size: 1.25rem; margin: 0 0 1rem; font-weight: 600; }
+    ul { margin: 0; padding-left: 1.25rem; line-height: 1.8; }
+    a { color: #8cb4ff; }
+    p { margin: 1rem 0 0; font-size: 0.9rem; color: #888; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>NeuroLens — local dev</h1>
+    <ul>
+      <li><a href="/preview.html">3D mesh</a> (<code>brain.glb</code>)</li>
+      <li><a href="/slices.html">2D cross-sections</a> (PNG stacks + manifest)</li>
+      <li><a href="/docs">API docs</a> (FastAPI)</li>
+    </ul>
+    <p>Run <code>pipeline/process_subject.py</code> before the viewers.</p>
+  </main>
+</body>
+</html>

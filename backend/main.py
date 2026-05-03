@@ -12,7 +12,9 @@ from fastapi.staticfiles import StaticFiles
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 STATIC_DIR = PROJECT_ROOT / "static"
 OUTPUTS_DIR = PROJECT_ROOT / "outputs"
+INDEX_HTML = STATIC_DIR / "index.html"
 PREVIEW_HTML = STATIC_DIR / "preview.html"
+SLICES_HTML = STATIC_DIR / "slices.html"
 
 OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -24,10 +26,26 @@ if STATIC_DIR.is_dir():
 app.mount("/outputs", StaticFiles(directory=str(OUTPUTS_DIR)), name="outputs")
 
 
-@app.get("/")
+@app.get("/", response_model=None)
 def root() -> FileResponse | RedirectResponse:
+    if INDEX_HTML.is_file():
+        return FileResponse(INDEX_HTML)
     if PREVIEW_HTML.is_file():
         return FileResponse(PREVIEW_HTML)
+    return RedirectResponse(url="/docs")
+
+
+@app.get("/preview.html", response_model=None)
+def preview_page() -> FileResponse | RedirectResponse:
+    if PREVIEW_HTML.is_file():
+        return FileResponse(PREVIEW_HTML)
+    return RedirectResponse(url="/docs")
+
+
+@app.get("/slices.html", response_model=None)
+def slices_page() -> FileResponse | RedirectResponse:
+    if SLICES_HTML.is_file():
+        return FileResponse(SLICES_HTML)
     return RedirectResponse(url="/docs")
 
 

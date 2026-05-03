@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>NeuroLens — slice viewer</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #111;
+      --panel: #1a1a1a;
+      --border: #333;
+      --text: #ddd;
+      --muted: #888;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+    header {
+      padding: 0.75rem 1rem;
+      background: var(--panel);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.75rem 1.25rem;
+    }
+    header a { color: #8cb4ff; }
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.5rem 1rem;
+    }
+    label { font-size: 0.9rem; color: var(--muted); }
+    select, button {
+      background: #2a2a2a;
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 0.35rem 0.6rem;
+      font: inherit;
+    }
+    button { cursor: pointer; }
+    button:hover { background: #353535; }
+    .slider-row {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      min-width: 220px;
+    }
+    input[type="range"] { flex: 1; min-width: 120px; }
+    #indexLabel { font-variant-numeric: tabular-nums; min-width: 7ch; }
+    main {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 1rem;
+      background: #0a0a0a;
+    }
+    #frame {
+      max-width: min(96vw, 900px);
+      max-height: calc(100vh - 120px);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      background: #000;
+    }
+    #frame img {
+      display: block;
+      max-width: 100%;
+      max-height: calc(100vh - 130px);
+      width: auto;
+      height: auto;
+      object-fit: contain;
+    }
+    #status { color: var(--muted); font-size: 0.9rem; }
+    #status.err { color: #f88; }
+  </style>
+</head>
+<body>
+  <header>
+    <span><strong>Cross-sections</strong> — from pipeline PNGs (<code>/outputs/manifest.json</code>)</span>
+    <nav><a href="/">Home</a></nav>
+    <div class="controls">
+      <div>
+        <label for="plane">Plane</label>
+        <select id="plane" aria-label="Slice plane"></select>
+      </div>
+      <div class="slider-row">
+        <label for="index">Index</label>
+        <input type="range" id="index" min="0" max="0" value="0" />
+        <span id="indexLabel">0</span>
+      </div>
+      <button type="button" id="prev" title="Previous slice">←</button>
+      <button type="button" id="next" title="Next slice">→</button>
+    </div>
+    <span id="status">Loading manifest…</span>
+  </header>
+  <main>
+    <div id="frame">
+      <img id="slice" alt="MRI slice" hidden />
+    </div>
+  </main>
+  <script>
+    const MANIFEST_URL = "/outputs/manifest.json";
+
+    let manifest = null;
+    let plane = "axial";
+
+    const el = {
+      status: document.getElementById("status"),
+      plane: document.getElementById("plane"),
+      index: document.getElementById("index"),
+      indexLabel: document.getElementById("indexLabel"),
+      prev: document.getElementById("prev"),
+      next: document.getElementById("next"),
+      slice: document.getElementById("slice"),
+    };
+
+    function setStatus(text, isError = false) {
+      el.status.textContent = text;
+      el.status.classList.toggle("err", isError);
+    }
+
+    function sliceUrl(pattern, index, pad) {
+      const s = String(index).padStart(pad, "0");
+      return pattern.replace("{index}", s);
+    }
+
+    function currentPlaneSpec() {
+      return manifest.slices[plane];
+    }
+
+    function refreshImage() {
+      if (!manifest) return;
+      const spec = currentPlaneSpec();
+      const idx = Number(el.index.value);
+      const url = sliceUrl(spec.urlPattern, idx, spec.indexPad);
+      el.indexLabel.textContent = String(idx);
+      el.slice.hidden = false;
+      el.slice.src = url;
+    }
+
+    function applyPlane() {
+      plane = el.plane.value;
+      const spec = currentPlaneSpec();
+      el.index.min = "0";
+      el.index.max = String(spec.count - 1);
+      let v = Number(el.index.value);
+      if (Number.isNaN(v)) v = spec.defaultIndex;
+      v = Math.min(Math.max(0, v), spec.count - 1);
+      el.index.value = String(v);
+      refreshImage();
+    }
+
+    el.plane.addEventListener("change", applyPlane);
+    el.index.addEventListener("input", refreshImage);
+    el.prev.addEventListener("click", () => {
+      const spec = currentPlaneSpec();
+      let v = Number(el.index.value) - 1;
+      if (v < 0) v = spec.count - 1;
+      el.index.value = String(v);
+      refreshImage();
+    });
+    el.next.addEventListener("click", () => {
+      const spec = currentPlaneSpec();
+      let v = Number(el.index.value) + 1;
+      if (v >= spec.count) v = 0;
+      el.index.value = String(v);
+      refreshImage();
+    });
+
+    el.slice.addEventListener("error", () => {
+      setStatus("Failed to load image — run pipeline and refresh.", true);
+    });
+    el.slice.addEventListener("load", () => {
+      if (!manifest) return;
+      const spec = currentPlaneSpec();
+      const n = Number(el.index.value) + 1;
+      setStatus(`${manifest.datasetId ?? "dataset"} · ${plane} · ${n} / ${spec.count}`);
+    });
+
+    async function init() {
+      try {
+        const res = await fetch(MANIFEST_URL);
+        if (!res.ok) throw new Error(res.status + " " + res.statusText);
+        manifest = await res.json();
+      } catch (e) {
+        setStatus("No manifest — run pipeline/process_subject.py first.", true);
+        return;
+      }
+
+      const planes = Object.keys(manifest.slices || {});
+      if (planes.length === 0) {
+        setStatus("Manifest has no slices section.", true);
+        return;
+      }
+
+      el.plane.innerHTML = planes
+        .map((p) => `<option value="${p}">${p}</option>`)
+        .join("");
+      el.plane.value = planes.includes("axial") ? "axial" : planes[0];
+      plane = el.plane.value;
+
+      const spec = currentPlaneSpec();
+      el.index.value = String(spec.defaultIndex);
+      applyPlane();
+    }
+
+    init();
+  </script>
+</body>
+</html>

@@ -7,15 +7,16 @@
   <script type="module" src="https://unpkg.com/@google/model-viewer@3.5.0/dist/model-viewer.min.js"></script>
   <style>
     body { margin: 0; font-family: system-ui, sans-serif; background: #111; color: #ddd; }
-    header { padding: 0.75rem 1rem; background: #1a1a1a; border-bottom: 1px solid #333; }
+    header { padding: 0.75rem 1rem; background: #1a1a1a; border-bottom: 1px solid #333; display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem 1rem; }
+    header a { color: #8cb4ff; }
     model-viewer { width: 100vw; height: calc(100vh - 52px); background: #0d0d0d; }
     code { background: #2a2a2a; padding: 0.1em 0.35em; border-radius: 4px; }
   </style>
 </head>
 <body>
   <header>
-    Pipeline mesh preview — expects <code>/outputs/mesh/brain.glb</code>
-    (run <code>pipeline/process_subject.py</code> first).
+    <span>Mesh preview — <code>/outputs/mesh/brain.glb</code></span>
+    <nav><a href="/">Home</a> · <a href="/slices.html">Slices</a></nav>
   </header>
   <model-viewer
     src="/outputs/mesh/brain.glb"
