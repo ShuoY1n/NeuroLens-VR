@@ -1,0 +1,18 @@
+NeuroLens Context/
+
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+*.egg-info/
+
+outputs/
+data/*.nii
+data/*.nii.gz
+*.nii
+*.nii.gz
+
+.DS_Store
+Thumbs.db
+
