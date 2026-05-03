@@ -14,16 +14,18 @@
 </head>
 <body>
   <header>
-    Pipeline mesh preview — expects <code>/outputs/mesh/brain.glb</code> (run <code>pipeline/process_subject.py</code> first).
+    Pipeline mesh preview — expects <code>/outputs/mesh/brain.glb</code>
+    (run <code>pipeline/process_subject.py</code> first).
   </header>
   <model-viewer
     src="/outputs/mesh/brain.glb"
     alt="Brain mesh"
     camera-controls
     touch-action="pan-y"
-    shadow-intensity="1"
-    exposure="1"
-    environment-image="neutral"
+    shadow-intensity="0.35"
+    exposure="0.55"
+    environment-image="legacy"
+    tone-mapping="neutral"
   ></model-viewer>
 </body>
 </html>
