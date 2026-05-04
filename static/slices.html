@@ -3,7 +3,15 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>NeuroLens — slice viewer</title>
+  <title>NeuroLens — volume cut</title>
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+    }
+  }
+  </script>
   <style>
     :root {
       color-scheme: dark;
@@ -58,28 +66,74 @@
     }
     input[type="range"] { flex: 1; min-width: 120px; }
     #indexLabel { font-variant-numeric: tabular-nums; min-width: 7ch; }
-    main {
+    .viewer-split {
+      flex: 1;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));
+      gap: 1rem;
+      padding: 1rem;
+      background: #0a0a0a;
+      min-height: 0;
+      align-content: stretch;
+    }
+    .panel {
+      display: flex;
+      flex-direction: column;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      overflow: hidden;
+      background: #000;
+      min-height: min(42vh, 420px);
+    }
+    .panel.wide {
+      min-height: min(58vh, 640px);
+      background: var(--panel);
+    }
+    .panel h2 {
+      font-size: 0.7rem;
+      margin: 0;
+      padding: 0.4rem 0.6rem;
+      background: var(--panel);
+      color: var(--muted);
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+    .slice-wrap {
       flex: 1;
       display: flex;
       align-items: center;
       justify-content: center;
-      padding: 1rem;
-      background: #0a0a0a;
+      padding: 0.5rem;
+      min-height: 0;
     }
-    #frame {
-      max-width: min(96vw, 900px);
-      max-height: calc(100vh - 120px);
-      border: 1px solid var(--border);
-      border-radius: 4px;
-      background: #000;
-    }
-    #frame img {
+    #slice {
       display: block;
       max-width: 100%;
-      max-height: calc(100vh - 130px);
+      max-height: 100%;
       width: auto;
       height: auto;
       object-fit: contain;
+    }
+    #three-host {
+      flex: 1;
+      min-height: 280px;
+      position: relative;
+      /* Canvas uses transparent clear; this shows through instead of solid black. */
+      background: var(--panel);
+    }
+    #three-host canvas { display: block; width: 100% !important; height: 100% !important; }
+    .axis-label {
+      font: 600 13px system-ui, sans-serif;
+      letter-spacing: 0.04em;
+      padding: 0.1em 0.35em;
+      border-radius: 4px;
+      background: rgba(0, 0, 0, 0.45);
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      pointer-events: none;
+      user-select: none;
+      white-space: nowrap;
+      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
     }
     #status { color: var(--muted); font-size: 0.9rem; }
     #status.err { color: #f88; }
@@ -87,15 +141,15 @@
 </head>
 <body>
   <header>
-    <span><strong>Cross-sections</strong> — from pipeline PNGs (<code>/outputs/manifest.json</code>)</span>
+    <span><strong>Volume cut</strong> — brain GLB + moving clip + slice PNG at the plane</span>
     <nav><a href="/">Home</a></nav>
     <div class="controls">
       <div>
-        <label for="plane">Plane</label>
-        <select id="plane" aria-label="Slice plane"></select>
+        <label for="plane">Cut along</label>
+        <select id="plane" aria-label="Cut axis"></select>
       </div>
       <div class="slider-row">
-        <label for="index">Index</label>
+        <label for="index">Slice</label>
         <input type="range" id="index" min="0" max="0" value="0" />
         <span id="indexLabel">0</span>
       </div>
@@ -104,16 +158,45 @@
     </div>
     <span id="status">Loading manifest…</span>
   </header>
-  <main>
-    <div id="frame">
-      <img id="slice" alt="MRI slice" hidden />
-    </div>
+  <main class="viewer-split">
+    <section class="panel wide" aria-label="3D cut">
+      <h2>3D — orbit to see the cut</h2>
+      <div id="three-host"></div>
+    </section>
+    <section class="panel" aria-label="2D slice">
+      <h2>2D — same slice</h2>
+      <div class="slice-wrap">
+        <img id="slice" alt="MRI slice" hidden />
+      </div>
+    </section>
   </main>
-  <script>
+  <script type="module">
+    import * as THREE from "three";
+    import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+    import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+    import { CSS2DRenderer, CSS2DObject } from "three/addons/renderers/CSS2DRenderer.js";
+
     const MANIFEST_URL = "/outputs/manifest.json";
 
     let manifest = null;
     let plane = "axial";
+    let idxI = 0;
+    let idxJ = 0;
+    let idxK = 0;
+
+    let scene = null;
+    let camera = null;
+    let renderer = null;
+    let labelRenderer = null;
+    let controls = null;
+    let raf = 0;
+    /** Holds brain + slice sheet + box; rotation maps NIfTI-style axes to Y-up. */
+    let volumeRoot = null;
+    let brainRoot = null;
+    const clipPlane = new THREE.Plane();
+    const clipPlaneLocal = new THREE.Plane();
+    let sliceSheet = null;
+    const texLoader = new THREE.TextureLoader();
 
     const el = {
       status: document.getElementById("status"),
@@ -123,6 +206,7 @@
       prev: document.getElementById("prev"),
       next: document.getElementById("next"),
       slice: document.getElementById("slice"),
+      threeHost: document.getElementById("three-host"),
     };
 
     function setStatus(text, isError = false) {
@@ -135,57 +219,471 @@
       return pattern.replace("{index}", s);
     }
 
+    function volDims() {
+      const d = manifest.volume.dimensions;
+      return { nx: d[0], ny: d[1], nz: d[2] };
+    }
+
+    function spacing() {
+      const s = manifest.volume.voxelSpacingMm;
+      return { sx: s[0], sy: s[1], sz: s[2] };
+    }
+
+    function volumeCentersMm() {
+      const { nx, ny, nz } = volDims();
+      const { sx, sy, sz } = spacing();
+      return {
+        cx: ((nx - 1) * sx) / 2,
+        cy: ((ny - 1) * sy) / 2,
+        cz: ((nz - 1) * sz) / 2,
+      };
+    }
+
     function currentPlaneSpec() {
       return manifest.slices[plane];
     }
 
-    function refreshImage() {
+    function readActiveIndexFromState() {
+      if (plane === "axial") return idxK;
+      if (plane === "coronal") return idxJ;
+      return idxI;
+    }
+
+    function writeActiveIndexToState(v) {
+      if (plane === "axial") idxK = v;
+      else if (plane === "coronal") idxJ = v;
+      else idxI = v;
+    }
+
+    function syncSliderFromState() {
+      const spec = currentPlaneSpec();
+      el.index.min = "0";
+      el.index.max = String(spec.count - 1);
+      el.index.value = String(readActiveIndexFromState());
+      el.indexLabel.textContent = el.index.value;
+    }
+
+    function refresh2D() {
       if (!manifest) return;
       const spec = currentPlaneSpec();
-      const idx = Number(el.index.value);
-      const url = sliceUrl(spec.urlPattern, idx, spec.indexPad);
-      el.indexLabel.textContent = String(idx);
+      const idx = readActiveIndexFromState();
       el.slice.hidden = false;
-      el.slice.src = url;
+      el.slice.src = sliceUrl(spec.urlPattern, idx, spec.indexPad);
+    }
+
+    /**
+     * Three.js keeps geometry where (n·x + plane.constant) >= 0.
+     * Normals chosen so the low-index side of the axis stays visible; the rest is clipped away.
+     */
+    function setClipPlaneForActiveAxis() {
+      const { sx, sy, sz } = spacing();
+      const { cx, cy, cz } = volumeCentersMm();
+      const p = new THREE.Vector3();
+      const n = new THREE.Vector3();
+
+      if (plane === "axial") {
+        const zCut = idxK * sz - cz;
+        n.set(0, 0, -1);
+        p.set(0, 0, zCut);
+      } else if (plane === "coronal") {
+        const yCut = idxJ * sy - cy;
+        n.set(0, -1, 0);
+        p.set(0, yCut, 0);
+      } else {
+        const xCut = idxI * sx - cx;
+        n.set(-1, 0, 0);
+        p.set(xCut, 0, 0);
+      }
+      clipPlaneLocal.setFromNormalAndCoplanarPoint(n, p);
+      if (volumeRoot) {
+        volumeRoot.updateMatrixWorld(true);
+        clipPlane.copy(clipPlaneLocal).applyMatrix4(volumeRoot.matrixWorld);
+      } else {
+        clipPlane.copy(clipPlaneLocal);
+      }
+    }
+
+    function applyClippingToBrain() {
+      if (!brainRoot || brainRoot.userData.neuroLensClipReady) return;
+      brainRoot.traverse((obj) => {
+        if (!obj.isMesh) return;
+        const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+        mats.forEach((m, i) => {
+          if (!m) return;
+          const mat = m.clone();
+          mat.clippingPlanes = [clipPlane];
+          mat.clipIntersection = false;
+          mat.side = THREE.DoubleSide;
+          if (Array.isArray(obj.material)) obj.material[i] = mat;
+          else obj.material = mat;
+        });
+      });
+      brainRoot.userData.neuroLensClipReady = true;
+    }
+
+    function layoutSliceSheet() {
+      if (!sliceSheet) return;
+      const { nx, ny, nz } = volDims();
+      const { sx, sy, sz } = spacing();
+      const { cx, cy, cz } = volumeCentersMm();
+      /* Nudge sheet past clip plane so grazing views do not z-fight; a bit more than before. */
+      const eps = Math.min(sx, sy, sz) * 0.14;
+
+      sliceSheet.rotation.set(0, 0, 0);
+      sliceSheet.scale.set(1, 1, 1);
+
+      if (plane === "axial") {
+        const zCut = idxK * sz - cz;
+        sliceSheet.scale.set((nx - 1) * sx, (ny - 1) * sy, 1);
+        sliceSheet.position.set(0, 0, zCut - eps);
+      } else if (plane === "coronal") {
+        const yCut = idxJ * sy - cy;
+        sliceSheet.scale.set((nx - 1) * sx, (nz - 1) * sz, 1);
+        sliceSheet.rotation.x = Math.PI / 2;
+        sliceSheet.position.set(0, yCut - eps, 0);
+      } else {
+        const xCut = idxI * sx - cx;
+        /* First scale axis = Z extent (k); negative scale mirrors across Z through quad center (z=0). */
+        sliceSheet.scale.set(-(nz - 1) * sz, (ny - 1) * sy, 1);
+        sliceSheet.rotation.y = -Math.PI / 2;
+        sliceSheet.position.set(xCut - eps, 0, 0);
+      }
+    }
+
+    function loadSliceTexture(url) {
+      return new Promise((resolve, reject) => {
+        texLoader.load(
+          url,
+          (tex) => {
+            tex.colorSpace = THREE.SRGBColorSpace;
+            resolve(tex);
+          },
+          undefined,
+          reject
+        );
+      });
+    }
+
+    /**
+     * Slice PNGs use 0 for background (see pipeline windowing). Fade those out so the quad
+     * does not paint a black rectangle—only tissue shows, matching the cut brain.
+     */
+    function buildSliceSheetMaterial(tex) {
+      const mat = new THREE.MeshBasicMaterial({
+        map: tex,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+        polygonOffset: true,
+        polygonOffsetFactor: -3,
+        polygonOffsetUnits: -3,
+        transparent: true,
+        toneMapped: false,
+      });
+      mat.onBeforeCompile = (shader) => {
+        shader.fragmentShader = shader.fragmentShader.replace(
+          "#include <opaque_fragment>",
+          `#include <opaque_fragment>
+          {
+            float _lum = max(gl_FragColor.r, max(gl_FragColor.g, gl_FragColor.b));
+            float _a = smoothstep(0.028, 0.058, _lum);
+            gl_FragColor.a *= _a;
+            if (gl_FragColor.a < 0.035) discard;
+          }`
+        );
+      };
+      return mat;
+    }
+
+    async function updateSliceSheetTexture() {
+      if (!sliceSheet || !manifest) return;
+      const spec = currentPlaneSpec();
+      const idx = readActiveIndexFromState();
+      const url = sliceUrl(spec.urlPattern, idx, spec.indexPad);
+      try {
+        const tex = await loadSliceTexture(url);
+        configureSliceTexture(tex, plane);
+        const old = sliceSheet.material.map;
+        if (old) old.dispose();
+        sliceSheet.material.dispose();
+        sliceSheet.material = buildSliceSheetMaterial(tex);
+      } catch {
+        setStatus("Failed to load slice PNG.", true);
+      }
+    }
+
+    async function refreshCut() {
+      if (!scene) return;
+      setClipPlaneForActiveAxis();
+      layoutSliceSheet();
+      await updateSliceSheetTexture();
+    }
+
+    function tick() {
+      raf = requestAnimationFrame(tick);
+      controls.update();
+      renderer.render(scene, camera);
+      if (labelRenderer) labelRenderer.render(scene, camera);
+    }
+
+    function onResize() {
+      if (!renderer || !camera) return;
+      const host = el.threeHost;
+      const w = host.clientWidth;
+      const h = host.clientHeight;
+      camera.aspect = w / Math.max(h, 1);
+      camera.updateProjectionMatrix();
+      renderer.setSize(w, Math.max(h, 1));
+      if (labelRenderer) labelRenderer.setSize(w, Math.max(h, 1));
+    }
+
+    function addVolumeAxisLabels() {
+      const { nx, ny, nz } = volDims();
+      const { sx, sy, sz } = spacing();
+      const hx = ((nx - 1) * sx) / 2;
+      const hy = ((ny - 1) * sy) / 2;
+      const hz = ((nz - 1) * sz) / 2;
+      const margin = Math.max(Math.min(sx, sy, sz) * 6, 8);
+
+      const axes = [
+        {
+          text: "X · i",
+          title: "1st voxel index (sagittal plane)",
+          color: "#ff6b6b",
+          pos: new THREE.Vector3(hx + margin, 0, 0),
+        },
+        {
+          text: "Y · j",
+          title: "2nd voxel index (coronal plane)",
+          color: "#69db7c",
+          pos: new THREE.Vector3(0, hy + margin, 0),
+        },
+        {
+          text: "Z · k",
+          title: "3rd voxel index (axial plane)",
+          color: "#74c0fc",
+          pos: new THREE.Vector3(0, 0, hz + margin),
+        },
+      ];
+
+      for (const a of axes) {
+        const div = document.createElement("div");
+        div.className = "axis-label";
+        div.textContent = a.text;
+        div.title = a.title;
+        div.style.color = a.color;
+        const label = new CSS2DObject(div);
+        label.position.copy(a.pos);
+        volumeRoot.add(label);
+      }
+    }
+
+    /**
+     * Marching-cubes verts use the same IJK→mm mapping as the slice PNGs:
+     * axis a runs from 0 toward (dims[a]-1)*spacing[a]. Clip planes use i*sx-cx, etc.
+     * Do NOT center by mesh bbox — that shifts the surface away from the cut planes.
+     */
+    function alignBrainToVolumeGrid(root) {
+      const { nx, ny, nz } = volDims();
+      const { sx, sy, sz } = spacing();
+      root.position.set(
+        -((nx - 1) * sx) / 2,
+        -((ny - 1) * sy) / 2,
+        -((nz - 1) * sz) / 2
+      );
+    }
+
+    /**
+     * PNG row/col vs quad UV: axial raw I×J; coronal/sagittal np.rot90 in pipeline (process_subject).
+     * Sagittal: 90° in the slice (Y–Z) plane only. (UV repeat/flip reflection made the cut vanish with clamp + alpha.)
+     */
+    function configureSliceTexture(tex, planeName) {
+      tex.center.set(0.5, 0.5);
+      tex.wrapS = THREE.ClampToEdgeWrapping;
+      tex.wrapT = THREE.ClampToEdgeWrapping;
+      tex.flipY = true;
+      tex.repeat.set(1, 1);
+      tex.offset.set(0, 0);
+      /* Grazing-angle “sheet” artifact: mips average in transparent border; keep LOD0 only. */
+      tex.generateMipmaps = false;
+      tex.minFilter = THREE.LinearFilter;
+      tex.magFilter = THREE.LinearFilter;
+      if (planeName === "axial") {
+        tex.rotation = Math.PI / 2;
+      } else if (planeName === "sagittal") {
+        tex.rotation = Math.PI / 2;
+      } else {
+        tex.rotation = 0;
+      }
+      tex.updateMatrix();
+    }
+
+    function initThree() {
+      const host = el.threeHost;
+      const w = host.clientWidth || 640;
+      const h = host.clientHeight || 480;
+
+      scene = new THREE.Scene();
+      scene.background = null;
+
+      // GLB uses PBR materials; they stay black without lights (unlike MeshBasicMaterial).
+      const hemi = new THREE.HemisphereLight(0xc8d4e8, 0x1a1a22, 0.9);
+      const sun = new THREE.DirectionalLight(0xffffff, 1.15);
+      sun.position.set(1.2, 2.0, 1.5);
+      const fill = new THREE.DirectionalLight(0xaaccff, 0.35);
+      fill.position.set(-1.5, -0.5, -1);
+      scene.add(hemi, sun, fill);
+
+      camera = new THREE.PerspectiveCamera(50, w / Math.max(h, 1), 0.1, 100000);
+      const { nx, ny, nz } = volDims();
+      const { sx, sy, sz } = spacing();
+      const diag = Math.sqrt((nx * sx) ** 2 + (ny * sy) ** 2 + (nz * sz) ** 2);
+      camera.position.set(diag * 0.55, diag * 0.4, diag * 0.65);
+
+      renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      renderer.setSize(w, Math.max(h, 1));
+      renderer.setClearColor(0x000000, 0);
+      renderer.outputColorSpace = THREE.SRGBColorSpace;
+      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      renderer.toneMappingExposure = 1.0;
+      renderer.localClippingEnabled = true;
+      host.appendChild(renderer.domElement);
+
+      labelRenderer = new CSS2DRenderer();
+      labelRenderer.setSize(w, Math.max(h, 1));
+      labelRenderer.domElement.style.position = "absolute";
+      labelRenderer.domElement.style.left = "0";
+      labelRenderer.domElement.style.top = "0";
+      labelRenderer.domElement.style.pointerEvents = "none";
+      host.appendChild(labelRenderer.domElement);
+
+      controls = new OrbitControls(camera, renderer.domElement);
+      controls.target.set(0, 0, 0);
+      controls.update();
+
+      volumeRoot = new THREE.Group();
+      // Voxel Z (slice axis) -> world +Y so the brain is upright; tweak euler if your data differs.
+      volumeRoot.rotation.set(-Math.PI / 2, 0, Math.PI, "XYZ");
+      scene.add(volumeRoot);
+
+      const boxGeom = new THREE.BoxGeometry(
+        (nx - 1) * sx,
+        (ny - 1) * sy,
+        (nz - 1) * sz
+      );
+      const edges = new THREE.LineSegments(
+        new THREE.EdgesGeometry(boxGeom),
+        new THREE.LineBasicMaterial({ color: 0x555555 })
+      );
+      volumeRoot.add(edges);
+      addVolumeAxisLabels();
+
+      const sheetGeom = new THREE.PlaneGeometry(1, 1);
+      sliceSheet = new THREE.Mesh(
+        sheetGeom,
+        new THREE.MeshBasicMaterial({ visible: true, color: 0x888888, side: THREE.DoubleSide })
+      );
+      sliceSheet.renderOrder = 10;
+      volumeRoot.add(sliceSheet);
+
+      window.addEventListener("resize", onResize);
+      cancelAnimationFrame(raf);
+      tick();
+    }
+
+    function loadBrainGlb(url) {
+      return new Promise((resolve, reject) => {
+        const loader = new GLTFLoader();
+        loader.load(
+          url,
+          (gltf) => resolve(gltf.scene),
+          undefined,
+          reject
+        );
+      });
+    }
+
+    async function attachBrain() {
+      const url = manifest.mesh && manifest.mesh.wholeBrainUrl;
+      if (!url) {
+        setStatus("Manifest missing mesh.wholeBrainUrl — run pipeline.", true);
+        return;
+      }
+      try {
+        if (brainRoot) {
+          volumeRoot.remove(brainRoot);
+          brainRoot.traverse((o) => {
+            if (o.geometry) o.geometry.dispose();
+            if (o.material) {
+              const ms = Array.isArray(o.material) ? o.material : [o.material];
+              ms.forEach((m) => {
+                if (m.map) m.map.dispose();
+                m.dispose();
+              });
+            }
+          });
+          brainRoot = null;
+        }
+        brainRoot = await loadBrainGlb(url);
+        alignBrainToVolumeGrid(brainRoot);
+        volumeRoot.add(brainRoot);
+        setClipPlaneForActiveAxis();
+        applyClippingToBrain();
+        setStatus("Drag to orbit · slider moves the cut");
+      } catch (e) {
+        setStatus("Could not load brain GLB.", true);
+      }
     }
 
     function applyPlane() {
       plane = el.plane.value;
+      syncSliderFromState();
+      refresh2D();
+      refreshCut();
+    }
+
+    function onIndexInput() {
       const spec = currentPlaneSpec();
-      el.index.min = "0";
-      el.index.max = String(spec.count - 1);
       let v = Number(el.index.value);
-      if (Number.isNaN(v)) v = spec.defaultIndex;
       v = Math.min(Math.max(0, v), spec.count - 1);
       el.index.value = String(v);
-      refreshImage();
+      writeActiveIndexToState(v);
+      el.indexLabel.textContent = String(v);
+      refresh2D();
+      refreshCut();
     }
 
     el.plane.addEventListener("change", applyPlane);
-    el.index.addEventListener("input", refreshImage);
+    el.index.addEventListener("input", onIndexInput);
     el.prev.addEventListener("click", () => {
       const spec = currentPlaneSpec();
-      let v = Number(el.index.value) - 1;
+      let v = readActiveIndexFromState() - 1;
       if (v < 0) v = spec.count - 1;
-      el.index.value = String(v);
-      refreshImage();
+      writeActiveIndexToState(v);
+      syncSliderFromState();
+      refresh2D();
+      refreshCut();
     });
     el.next.addEventListener("click", () => {
       const spec = currentPlaneSpec();
-      let v = Number(el.index.value) + 1;
+      let v = readActiveIndexFromState() + 1;
       if (v >= spec.count) v = 0;
-      el.index.value = String(v);
-      refreshImage();
+      writeActiveIndexToState(v);
+      syncSliderFromState();
+      refresh2D();
+      refreshCut();
     });
 
     el.slice.addEventListener("error", () => {
-      setStatus("Failed to load image — run pipeline and refresh.", true);
+      setStatus("Failed to load slice PNG — run pipeline and refresh.", true);
     });
     el.slice.addEventListener("load", () => {
       if (!manifest) return;
       const spec = currentPlaneSpec();
-      const n = Number(el.index.value) + 1;
-      setStatus(`${manifest.datasetId ?? "dataset"} · ${plane} · ${n} / ${spec.count}`);
+      const n = readActiveIndexFromState() + 1;
+      setStatus(
+        `${manifest.datasetId ?? "dataset"} · ${plane} slice ${n}/${spec.count} · orbit 3D`
+      );
     });
 
     async function init() {
@@ -193,16 +691,20 @@
         const res = await fetch(MANIFEST_URL);
         if (!res.ok) throw new Error(res.status + " " + res.statusText);
         manifest = await res.json();
-      } catch (e) {
+      } catch {
         setStatus("No manifest — run pipeline/process_subject.py first.", true);
         return;
       }
 
       const planes = Object.keys(manifest.slices || {});
-      if (planes.length === 0) {
-        setStatus("Manifest has no slices section.", true);
+      if (planes.length === 0 || !manifest.volume) {
+        setStatus("Manifest missing volume or slices.", true);
         return;
       }
+
+      idxI = manifest.slices.sagittal.defaultIndex;
+      idxJ = manifest.slices.coronal.defaultIndex;
+      idxK = manifest.slices.axial.defaultIndex;
 
       el.plane.innerHTML = planes
         .map((p) => `<option value="${p}">${p}</option>`)
@@ -210,9 +712,14 @@
       el.plane.value = planes.includes("axial") ? "axial" : planes[0];
       plane = el.plane.value;
 
-      const spec = currentPlaneSpec();
-      el.index.value = String(spec.defaultIndex);
-      applyPlane();
+      initThree();
+      onResize();
+      syncSliderFromState();
+      refresh2D();
+      setClipPlaneForActiveAxis();
+      await attachBrain();
+      layoutSliceSheet();
+      await updateSliceSheetTexture();
     }
 
     init();

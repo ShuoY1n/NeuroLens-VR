@@ -198,7 +198,7 @@ def main() -> None:
         raise SystemExit("T1 and label affines differ — voxels are not aligned.")
 
     t1_voxels = np.asanyarray(t1_image.dataobj, dtype=np.float32)
-    label_ids = np.asanyarray(labels_image.dataobj).astype(np.int32)
+    label_ids = np.asanyarray(labels_image.dataobj, dtype=np.int32)
     header_zooms = t1_image.header.get_zooms()[:3]
     voxel_spacing_mm = tuple(float(z) for z in header_zooms)
 
