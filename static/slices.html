@@ -65,7 +65,12 @@
       min-width: 220px;
     }
     input[type="range"] { flex: 1; min-width: 120px; }
-    #indexLabel { font-variant-numeric: tabular-nums; min-width: 7ch; }
+    #indexLabel,
+    #yawLabel,
+    #pitchLabel,
+    #obliqueOffsetLabel { font-variant-numeric: tabular-nums; min-width: 7ch; }
+    .oblique-controls { row-gap: 0.5rem; }
+    .oblique-controls[hidden] { display: none; }
     .viewer-split {
       flex: 1;
       display: grid;
@@ -148,13 +153,38 @@
         <label for="plane">Cut along</label>
         <select id="plane" aria-label="Cut axis"></select>
       </div>
-      <div class="slider-row">
+      <div class="slider-row" id="cardinalIndexRow">
         <label for="index">Slice</label>
         <input type="range" id="index" min="0" max="0" value="0" />
         <span id="indexLabel">0</span>
       </div>
       <button type="button" id="prev" title="Previous slice">←</button>
       <button type="button" id="next" title="Next slice">→</button>
+    </div>
+    <div class="controls oblique-controls" id="obliqueControls" hidden>
+      <div class="slider-row">
+        <label for="yaw">Yaw °</label>
+        <input type="range" id="yaw" min="-180" max="180" step="1" value="0" />
+        <span id="yawLabel">0</span>
+      </div>
+      <div class="slider-row">
+        <label for="pitch">Pitch °</label>
+        <input type="range" id="pitch" min="-90" max="90" step="1" value="0" />
+        <span id="pitchLabel">0</span>
+      </div>
+      <div class="slider-row">
+        <label for="obliqueOffset">Offset mm</label>
+        <input
+          type="range"
+          id="obliqueOffset"
+          min="-100"
+          max="100"
+          step="0.5"
+          value="0"
+        />
+        <span id="obliqueOffsetLabel">0</span>
+      </div>
+      <button type="button" id="resetOblique" title="Reset oblique to axial">Reset</button>
     </div>
     <span id="status">Loading manifest…</span>
   </header>
@@ -177,12 +207,34 @@
     import { CSS2DRenderer, CSS2DObject } from "three/addons/renderers/CSS2DRenderer.js";
 
     const MANIFEST_URL = "/outputs/manifest.json";
+    const OBLIQUE_PLANE_NAME = "oblique";
+    const OBLIQUE_ENDPOINT = "/api/slice/oblique";
+    const OBLIQUE_PNG_SIZE = 192;
 
     let manifest = null;
     let plane = "axial";
     let idxI = 0;
     let idxJ = 0;
     let idxK = 0;
+
+    /**
+     * Oblique mode state. The basis (right, up, n) and halfExtent are computed
+     * from yaw/pitch and shared between the 3D clip plane, the slice sheet
+     * placement, and the API request URL so all three views stay in sync.
+     */
+    const oblique = {
+      yawDeg: 0,
+      pitchDeg: 0,
+      offsetMm: 0,
+      offsetMaxMm: 100,
+      halfExtentMm: 100,
+      n: new THREE.Vector3(0, 0, 1),
+      right: new THREE.Vector3(1, 0, 0),
+      up: new THREE.Vector3(0, 1, 0),
+      requestSeq: 0,
+      pendingRequest: null,
+      activeRequest: null,
+    };
 
     let scene = null;
     let camera = null;
@@ -207,6 +259,15 @@
       next: document.getElementById("next"),
       slice: document.getElementById("slice"),
       threeHost: document.getElementById("three-host"),
+      cardinalIndexRow: document.getElementById("cardinalIndexRow"),
+      obliqueControls: document.getElementById("obliqueControls"),
+      yaw: document.getElementById("yaw"),
+      yawLabel: document.getElementById("yawLabel"),
+      pitch: document.getElementById("pitch"),
+      pitchLabel: document.getElementById("pitchLabel"),
+      obliqueOffset: document.getElementById("obliqueOffset"),
+      obliqueOffsetLabel: document.getElementById("obliqueOffsetLabel"),
+      resetOblique: document.getElementById("resetOblique"),
     };
 
     function setStatus(text, isError = false) {
@@ -239,6 +300,86 @@
       };
     }
 
+    function volumeDiagonalMm() {
+      const { nx, ny, nz } = volDims();
+      const { sx, sy, sz } = spacing();
+      return Math.sqrt((nx * sx) ** 2 + (ny * sy) ** 2 + (nz * sz) ** 2);
+    }
+
+    /**
+     * Volume-local oblique normal for (yaw, pitch) in degrees.
+     * Pitch tilts the default axial normal (+k) toward -j; yaw rotates the
+     * tilted normal around +k. Mirrors backend/oblique.py orientation.
+     */
+    function obliqueNormalFromAngles(yawDeg, pitchDeg) {
+      const yaw = (yawDeg * Math.PI) / 180;
+      const pitch = (pitchDeg * Math.PI) / 180;
+      const sinPitch = Math.sin(pitch);
+      const cosPitch = Math.cos(pitch);
+      const sinYaw = Math.sin(yaw);
+      const cosYaw = Math.cos(yaw);
+      return new THREE.Vector3(
+        sinPitch * sinYaw,
+        -sinPitch * cosYaw,
+        cosPitch
+      ).normalize();
+    }
+
+    /**
+     * Same in-plane basis as backend/oblique.py: first non-degenerate projection
+     * of e_x, e_y, e_z onto the plane ⊥ n (e_x first fixes pure axial / pitch 0).
+     */
+    function obliqueBasis(normal) {
+      const n = normal.clone().normalize();
+      const candidates = [
+        new THREE.Vector3(1, 0, 0),
+        new THREE.Vector3(0, 1, 0),
+        new THREE.Vector3(0, 0, 1),
+      ];
+      let right = null;
+      for (const axis of candidates) {
+        const t = axis.clone().sub(n.clone().multiplyScalar(axis.dot(n)));
+        const len = t.length();
+        if (len >= 1e-10) {
+          right = t.divideScalar(len);
+          break;
+        }
+      }
+      if (!right) {
+        right = new THREE.Vector3(1, 0, 0);
+      }
+      const up = new THREE.Vector3().crossVectors(n, right).normalize();
+      return { right, up, n };
+    }
+
+    function recomputeObliqueBasis() {
+      const n = obliqueNormalFromAngles(oblique.yawDeg, oblique.pitchDeg);
+      const { right, up } = obliqueBasis(n);
+      oblique.n.copy(n);
+      oblique.right.copy(right);
+      oblique.up.copy(up);
+      oblique.halfExtentMm = volumeDiagonalMm() / 2;
+
+      const { cx, cy, cz } = volumeCentersMm();
+      const offsetMax =
+        Math.abs(cx * n.x) + Math.abs(cy * n.y) + Math.abs(cz * n.z);
+      oblique.offsetMaxMm = Math.max(offsetMax, 1);
+
+      el.obliqueOffset.min = (-oblique.offsetMaxMm).toFixed(1);
+      el.obliqueOffset.max = oblique.offsetMaxMm.toFixed(1);
+      const clampedOffset = Math.min(
+        Math.max(oblique.offsetMm, -oblique.offsetMaxMm),
+        oblique.offsetMaxMm
+      );
+      oblique.offsetMm = clampedOffset;
+      el.obliqueOffset.value = clampedOffset.toFixed(1);
+      el.obliqueOffsetLabel.textContent = clampedOffset.toFixed(1);
+    }
+
+    function isObliqueActive() {
+      return plane === OBLIQUE_PLANE_NAME;
+    }
+
     function currentPlaneSpec() {
       return manifest.slices[plane];
     }
@@ -265,34 +406,56 @@
 
     function refresh2D() {
       if (!manifest) return;
+      el.slice.hidden = false;
+      if (isObliqueActive()) {
+        el.slice.src = obliqueSliceUrl();
+        return;
+      }
       const spec = currentPlaneSpec();
       const idx = readActiveIndexFromState();
-      el.slice.hidden = false;
       el.slice.src = sliceUrl(spec.urlPattern, idx, spec.indexPad);
+    }
+
+    function obliqueSliceUrl() {
+      const params = new URLSearchParams({
+        nx: oblique.n.x.toFixed(6),
+        ny: oblique.n.y.toFixed(6),
+        nz: oblique.n.z.toFixed(6),
+        offset: oblique.offsetMm.toFixed(3),
+        size: String(OBLIQUE_PNG_SIZE),
+      });
+      return `${OBLIQUE_ENDPOINT}?${params.toString()}`;
     }
 
     /**
      * Three.js keeps geometry where (n·x + plane.constant) >= 0.
-     * Normals chosen so the low-index side of the axis stays visible; the rest is clipped away.
+     * Normals chosen so the side opposite the slice-sheet front stays visible.
+     * Cardinal modes match the prior behaviour; oblique mirrors that convention
+     * by clipping along -n (so the brain "behind" the cut surface is hidden).
      */
     function setClipPlaneForActiveAxis() {
-      const { sx, sy, sz } = spacing();
-      const { cx, cy, cz } = volumeCentersMm();
       const p = new THREE.Vector3();
       const n = new THREE.Vector3();
 
-      if (plane === "axial") {
-        const zCut = idxK * sz - cz;
-        n.set(0, 0, -1);
-        p.set(0, 0, zCut);
-      } else if (plane === "coronal") {
-        const yCut = idxJ * sy - cy;
-        n.set(0, -1, 0);
-        p.set(0, yCut, 0);
+      if (isObliqueActive()) {
+        n.copy(oblique.n).multiplyScalar(-1);
+        p.copy(oblique.n).multiplyScalar(oblique.offsetMm);
       } else {
-        const xCut = idxI * sx - cx;
-        n.set(-1, 0, 0);
-        p.set(xCut, 0, 0);
+        const { sx, sy, sz } = spacing();
+        const { cx, cy, cz } = volumeCentersMm();
+        if (plane === "axial") {
+          const zCut = idxK * sz - cz;
+          n.set(0, 0, -1);
+          p.set(0, 0, zCut);
+        } else if (plane === "coronal") {
+          const yCut = idxJ * sy - cy;
+          n.set(0, -1, 0);
+          p.set(0, yCut, 0);
+        } else {
+          const xCut = idxI * sx - cx;
+          n.set(-1, 0, 0);
+          p.set(xCut, 0, 0);
+        }
       }
       clipPlaneLocal.setFromNormalAndCoplanarPoint(n, p);
       if (volumeRoot) {
@@ -329,8 +492,15 @@
       /* Nudge sheet past clip plane so grazing views do not z-fight; a bit more than before. */
       const eps = Math.min(sx, sy, sz) * 0.14;
 
+      sliceSheet.matrixAutoUpdate = true;
       sliceSheet.rotation.set(0, 0, 0);
+      sliceSheet.quaternion.set(0, 0, 0, 1);
       sliceSheet.scale.set(1, 1, 1);
+
+      if (isObliqueActive()) {
+        layoutSliceSheetOblique(eps);
+        return;
+      }
 
       if (plane === "axial") {
         const zCut = idxK * sz - cz;
@@ -348,6 +518,26 @@
         sliceSheet.rotation.y = -Math.PI / 2;
         sliceSheet.position.set(xCut - eps, 0, 0);
       }
+    }
+
+    /**
+     * Position the slice sheet so its local +X = `right`, +Y = `up`, +Z = `n`.
+     * Scaling matches the PNG's covered area (2 * halfExtentMm per side) and
+     * the sheet is nudged epsilon along -n to avoid z-fighting with the clip.
+     */
+    function layoutSliceSheetOblique(epsMm) {
+      const r = oblique.right;
+      const u = oblique.up;
+      const n = oblique.n;
+      const basis = new THREE.Matrix4().makeBasis(r, u, n);
+      const q = new THREE.Quaternion().setFromRotationMatrix(basis);
+
+      const size = 2 * oblique.halfExtentMm;
+      sliceSheet.quaternion.copy(q);
+      sliceSheet.scale.set(size, size, 1);
+      sliceSheet.position
+        .copy(n)
+        .multiplyScalar(oblique.offsetMm - epsMm);
     }
 
     function loadSliceTexture(url) {
@@ -396,12 +586,25 @@
 
     async function updateSliceSheetTexture() {
       if (!sliceSheet || !manifest) return;
-      const spec = currentPlaneSpec();
-      const idx = readActiveIndexFromState();
-      const url = sliceUrl(spec.urlPattern, idx, spec.indexPad);
+      const url = isObliqueActive()
+        ? obliqueSliceUrl()
+        : (() => {
+            const spec = currentPlaneSpec();
+            return sliceUrl(spec.urlPattern, readActiveIndexFromState(), spec.indexPad);
+          })();
+      const seq = ++oblique.requestSeq;
       try {
         const tex = await loadSliceTexture(url);
-        configureSliceTexture(tex, plane);
+        // Discard if the user advanced past this request (oblique slider drag).
+        if (seq !== oblique.requestSeq) {
+          tex.dispose?.();
+          return;
+        }
+        if (isObliqueActive()) {
+          configureSliceTextureOblique(tex);
+        } else {
+          configureSliceTexture(tex, plane);
+        }
         const old = sliceSheet.material.map;
         if (old) old.dispose();
         sliceSheet.material.dispose();
@@ -409,6 +612,26 @@
       } catch {
         setStatus("Failed to load slice PNG.", true);
       }
+    }
+
+    /**
+     * Oblique PNGs are emitted with row 0 = +up, col 0 = -right. Pair that
+     * convention with `flipY = false` so plane local +X maps to image right
+     * and plane local +Y maps to image top — see backend/oblique.py.
+     */
+    function configureSliceTextureOblique(tex) {
+      tex.center.set(0.5, 0.5);
+      tex.wrapS = THREE.ClampToEdgeWrapping;
+      tex.wrapT = THREE.ClampToEdgeWrapping;
+      tex.flipY = false;
+      tex.repeat.set(1, 1);
+      tex.offset.set(0, 0);
+      tex.rotation = 0;
+      tex.generateMipmaps = false;
+      tex.minFilter = THREE.LinearFilter;
+      tex.magFilter = THREE.LinearFilter;
+      tex.needsUpdate = true;
+      tex.updateMatrix();
     }
 
     async function refreshCut() {
@@ -637,12 +860,34 @@
 
     function applyPlane() {
       plane = el.plane.value;
-      syncSliderFromState();
+      const oblique_ = isObliqueActive();
+      el.cardinalIndexRow.hidden = oblique_;
+      el.prev.hidden = oblique_;
+      el.next.hidden = oblique_;
+      el.obliqueControls.hidden = !oblique_;
+
+      if (!oblique_ && obliquePngRafId) {
+        cancelAnimationFrame(obliquePngRafId);
+        obliquePngRafId = 0;
+      }
+
+      if (oblique_) {
+        recomputeObliqueBasis();
+      } else {
+        syncSliderFromState();
+      }
       refresh2D();
       refreshCut();
     }
 
+    function updateObliqueGeometryOnly() {
+      if (!scene || !isObliqueActive()) return;
+      setClipPlaneForActiveAxis();
+      layoutSliceSheet();
+    }
+
     function onIndexInput() {
+      if (isObliqueActive()) return;
       const spec = currentPlaneSpec();
       let v = Number(el.index.value);
       v = Math.min(Math.max(0, v), spec.count - 1);
@@ -653,9 +898,69 @@
       refreshCut();
     }
 
+    function onObliqueAngleInput() {
+      oblique.yawDeg = Number(el.yaw.value);
+      oblique.pitchDeg = Number(el.pitch.value);
+      el.yawLabel.textContent = oblique.yawDeg.toFixed(0);
+      el.pitchLabel.textContent = oblique.pitchDeg.toFixed(0);
+      recomputeObliqueBasis();
+      updateObliqueGeometryOnly();
+      scheduleObliquePngRefresh();
+    }
+
+    function onObliqueOffsetInput() {
+      oblique.offsetMm = Number(el.obliqueOffset.value);
+      el.obliqueOffsetLabel.textContent = oblique.offsetMm.toFixed(1);
+      // Offset changes do not invalidate the basis, only the plane position.
+      updateObliqueGeometryOnly();
+      scheduleObliquePngRefresh();
+    }
+
+    function resetOblique() {
+      oblique.yawDeg = 0;
+      oblique.pitchDeg = 0;
+      oblique.offsetMm = 0;
+      el.yaw.value = "0";
+      el.pitch.value = "0";
+      el.yawLabel.textContent = "0";
+      el.pitchLabel.textContent = "0";
+      recomputeObliqueBasis();
+      updateObliqueGeometryOnly();
+      scheduleObliquePngRefresh(true);
+    }
+
+    /** Coalesce oblique PNG updates to ~one per animation frame while dragging. */
+    let obliquePngRafId = 0;
+    function flushObliquePngRefresh() {
+      if (!isObliqueActive()) return;
+      refresh2D();
+      updateSliceSheetTexture();
+    }
+    function scheduleObliquePngRefresh(immediate = false) {
+      if (!isObliqueActive()) return;
+      if (immediate) {
+        if (obliquePngRafId) {
+          cancelAnimationFrame(obliquePngRafId);
+          obliquePngRafId = 0;
+        }
+        flushObliquePngRefresh();
+        return;
+      }
+      if (obliquePngRafId) return;
+      obliquePngRafId = requestAnimationFrame(() => {
+        obliquePngRafId = 0;
+        flushObliquePngRefresh();
+      });
+    }
+
     el.plane.addEventListener("change", applyPlane);
     el.index.addEventListener("input", onIndexInput);
+    el.yaw.addEventListener("input", onObliqueAngleInput);
+    el.pitch.addEventListener("input", onObliqueAngleInput);
+    el.obliqueOffset.addEventListener("input", onObliqueOffsetInput);
+    el.resetOblique.addEventListener("click", resetOblique);
     el.prev.addEventListener("click", () => {
+      if (isObliqueActive()) return;
       const spec = currentPlaneSpec();
       let v = readActiveIndexFromState() - 1;
       if (v < 0) v = spec.count - 1;
@@ -665,6 +970,7 @@
       refreshCut();
     });
     el.next.addEventListener("click", () => {
+      if (isObliqueActive()) return;
       const spec = currentPlaneSpec();
       let v = readActiveIndexFromState() + 1;
       if (v >= spec.count) v = 0;
@@ -675,15 +981,26 @@
     });
 
     el.slice.addEventListener("error", () => {
-      setStatus("Failed to load slice PNG — run pipeline and refresh.", true);
+      setStatus(
+        isObliqueActive()
+          ? "Oblique slice request failed — is /api/slice/oblique reachable?"
+          : "Failed to load slice PNG — run pipeline and refresh.",
+        true
+      );
     });
     el.slice.addEventListener("load", () => {
       if (!manifest) return;
-      const spec = currentPlaneSpec();
-      const n = readActiveIndexFromState() + 1;
-      setStatus(
-        `${manifest.datasetId ?? "dataset"} · ${plane} slice ${n}/${spec.count} · orbit 3D`
-      );
+      const datasetLabel = manifest.datasetId ?? "dataset";
+      if (isObliqueActive()) {
+        setStatus(
+          `${datasetLabel} · oblique · yaw ${oblique.yawDeg.toFixed(0)}° ` +
+            `pitch ${oblique.pitchDeg.toFixed(0)}° offset ${oblique.offsetMm.toFixed(1)} mm`
+        );
+      } else {
+        const spec = currentPlaneSpec();
+        const n = readActiveIndexFromState() + 1;
+        setStatus(`${datasetLabel} · ${plane} slice ${n}/${spec.count} · orbit 3D`);
+      }
     });
 
     async function init() {
@@ -706,7 +1023,8 @@
       idxJ = manifest.slices.coronal.defaultIndex;
       idxK = manifest.slices.axial.defaultIndex;
 
-      el.plane.innerHTML = planes
+      const planeOptions = [...planes, OBLIQUE_PLANE_NAME];
+      el.plane.innerHTML = planeOptions
         .map((p) => `<option value="${p}">${p}</option>`)
         .join("");
       el.plane.value = planes.includes("axial") ? "axial" : planes[0];

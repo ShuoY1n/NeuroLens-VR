@@ -142,6 +142,7 @@ def build_manifest(
         "volume": {
             "dimensions": [nx, ny, nz],
             "voxelSpacingMm": list(voxel_spacing_mm),
+            "dataUrl": "/outputs/volume.npy",
         },
         "mesh": {
             "wholeBrainUrl": "/outputs/mesh/brain.glb",
@@ -151,6 +152,16 @@ def build_manifest(
             "axial": slice_block("axial"),
             "coronal": slice_block("coronal"),
             "sagittal": slice_block("sagittal"),
+        },
+        "obliqueSlice": {
+            "endpoint": "/api/slice/oblique",
+            "params": {
+                "nx": "float (volume-local mm; unit normal x)",
+                "ny": "float (volume-local mm; unit normal y)",
+                "nz": "float (volume-local mm; unit normal z)",
+                "offset": "float (mm along normal from volume center)",
+                "size": "int (output PNG side length, default 192)",
+            },
         },
     }
 
@@ -205,6 +216,10 @@ def main() -> None:
     volume_u8 = intensity_volume_to_display_u8(t1_voxels)
     slice_meta = export_slice_png_stacks(volume_u8, output_dir)
 
+    # Backend resamples this for oblique slices; .npy keeps shape/dtype faithfully.
+    volume_npy_path = output_dir / "volume.npy"
+    np.save(volume_npy_path, volume_u8, allow_pickle=False)
+
     brain_foreground = label_ids > 0
     brain_mesh = mesh_from_foreground_mask(brain_foreground, voxel_spacing_mm)
     brain_mesh.merge_vertices()
@@ -215,7 +230,10 @@ def main() -> None:
     with manifest_path.open("w", encoding="utf-8") as file_handle:
         json.dump(manifest, file_handle, indent=2)
 
-    print(f"Wrote {manifest_path}, mesh, and slice stacks under {output_dir}.")
+    print(
+        f"Wrote {manifest_path}, mesh, slice stacks, and {volume_npy_path.name} "
+        f"under {output_dir}."
+    )
 
 
 if __name__ == "__main__":
