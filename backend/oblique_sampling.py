@@ -27,93 +27,10 @@ image top.
 
 from __future__ import annotations
 
-import json
-from dataclasses import dataclass
-from pathlib import Path
-from threading import Lock
-
 import numpy as np
 from scipy.ndimage import map_coordinates
 
-
-@dataclass(frozen=True)
-class VolumeData:
-    voxels_u8: np.ndarray
-    spacing_mm: tuple[float, float, float]
-    dataset_id: str
-
-    @property
-    def shape(self) -> tuple[int, int, int]:
-        return (
-            int(self.voxels_u8.shape[0]),
-            int(self.voxels_u8.shape[1]),
-            int(self.voxels_u8.shape[2]),
-        )
-
-    @property
-    def center_mm(self) -> tuple[float, float, float]:
-        ni, nj, nk = self.shape
-        sx, sy, sz = self.spacing_mm
-        return ((ni - 1) * sx / 2.0, (nj - 1) * sy / 2.0, (nk - 1) * sz / 2.0)
-
-    @property
-    def diagonal_mm(self) -> float:
-        ni, nj, nk = self.shape
-        sx, sy, sz = self.spacing_mm
-        return float(np.sqrt((ni * sx) ** 2 + (nj * sy) ** 2 + (nk * sz) ** 2))
-
-
-class VolumeStore:
-    """Lazy, mtime-aware cache for the on-disk windowed volume + manifest."""
-
-    def __init__(self, outputs_dir: Path) -> None:
-        self._outputs_dir = outputs_dir
-        self._lock = Lock()
-        self._cached: VolumeData | None = None
-        self._cache_signature: tuple[float, float] | None = None
-
-    def get(self) -> VolumeData:
-        npy_path = self._outputs_dir / "volume.npy"
-        manifest_path = self._outputs_dir / "manifest.json"
-        if not npy_path.is_file():
-            raise FileNotFoundError(
-                f"Missing {npy_path}. Run pipeline/process_subject.py first."
-            )
-        if not manifest_path.is_file():
-            raise FileNotFoundError(
-                f"Missing {manifest_path}. Run pipeline/process_subject.py first."
-            )
-
-        signature = (
-            npy_path.stat().st_mtime,
-            manifest_path.stat().st_mtime,
-        )
-        with self._lock:
-            if self._cached is not None and self._cache_signature == signature:
-                return self._cached
-
-            voxels = np.load(npy_path, allow_pickle=False)
-            if voxels.dtype != np.uint8 or voxels.ndim != 3:
-                raise ValueError(
-                    "Expected uint8 3D array in volume.npy "
-                    f"(got dtype={voxels.dtype}, shape={voxels.shape})."
-                )
-            with manifest_path.open("r", encoding="utf-8") as file_handle:
-                manifest = json.load(file_handle)
-            spacing = tuple(float(v) for v in manifest["volume"]["voxelSpacingMm"])
-            if len(spacing) != 3:
-                raise ValueError(
-                    f"manifest.volume.voxelSpacingMm must have 3 entries (got {spacing})."
-                )
-            dataset_id = str(manifest.get("datasetId", "unknown"))
-
-            self._cached = VolumeData(
-                voxels_u8=voxels,
-                spacing_mm=spacing,  # type: ignore[arg-type]
-                dataset_id=dataset_id,
-            )
-            self._cache_signature = signature
-            return self._cached
+from backend.volume_data import VolumeData
 
 
 def plane_basis(normal: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
