@@ -11,6 +11,7 @@ def build_manifest(
     t1_voxels: np.ndarray,
     voxel_spacing_mm: tuple[float, float, float],
     slice_meta: dict[str, dict],
+    structures: list[dict] | None = None,
 ) -> dict:
     # Shape matches NeuroLens Context/05_Asset_Manifest_and_Contract.md
     nx, ny, nz = (int(t1_voxels.shape[0]), int(t1_voxels.shape[1]), int(t1_voxels.shape[2]))
@@ -24,7 +25,7 @@ def build_manifest(
             "defaultIndex": block["defaultIndex"],
         }
 
-    return {
+    manifest: dict = {
         "schemaVersion": 1,
         "datasetId": dataset_folder_name,
         "orientationNotes": (
@@ -56,6 +57,11 @@ def build_manifest(
             },
         },
     }
+
+    if structures:
+        manifest["structures"] = structures
+
+    return manifest
 
 
 def write_manifest(manifest: dict, manifest_path: Path) -> None:

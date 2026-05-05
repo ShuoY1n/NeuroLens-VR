@@ -13,9 +13,24 @@ import numpy as np
 
 from config import REPO_ROOT
 from manifest import build_manifest, write_manifest
-from mesh_export import export_brain_glb
+from mesh_export import export_brain_glb, export_structure_glbs, export_structure_glbs_from_specs
 from oasis_subject import require_existing_paths
 from slice_export import export_slice_png_stacks, intensity_volume_to_display_u8
+from label_mappings import load_label_mappings
+from structure_presets import important_structures
+
+
+def _parse_int_list(csv: str) -> list[int]:
+    items: list[int] = []
+    for part in csv.split(","):
+        p = part.strip()
+        if not p:
+            continue
+        try:
+            items.append(int(p))
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError(f"Invalid int in list: {p!r}") from exc
+    return items
 
 
 def main() -> None:
@@ -31,6 +46,29 @@ def main() -> None:
         type=Path,
         default=REPO_ROOT / "outputs",
         help="Output directory",
+    )
+    parser.add_argument(
+        "--structures",
+        type=str,
+        default="",
+        help="Comma-separated label ids to export as individual GLBs (e.g. '4,10,23').",
+    )
+    parser.add_argument(
+        "--structures-top",
+        type=int,
+        default=0,
+        help="If >0, export the top-N non-zero labels by voxel count.",
+    )
+    parser.add_argument(
+        "--structures-min-voxels",
+        type=int,
+        default=1500,
+        help="Minimum voxel count for auto-selected structures (used with --structures-top).",
+    )
+    parser.add_argument(
+        "--structures-important",
+        action="store_true",
+        help="Export a curated set of important subcortical structures (default if no other --structures* flags are provided).",
     )
     args = parser.parse_args()
 
@@ -61,7 +99,55 @@ def main() -> None:
 
     export_brain_glb(label_ids > 0, voxel_spacing_mm, output_dir / "mesh" / "brain.glb")
 
-    manifest = build_manifest(subject_folder, t1_voxels, voxel_spacing_mm, slice_meta)
+    structures: list[dict] = []
+    # Optional label id -> name mapping for friendlier structure labels.
+    label_name_by_id: dict[int, str] = {}
+    try:
+        mappings = load_label_mappings(REPO_ROOT)
+        label_name_by_id = {k: v.name for k, v in mappings.items()}
+    except FileNotFoundError:
+        label_name_by_id = {}
+    requested = _parse_int_list(args.structures) if args.structures else []
+    if args.structures_top and args.structures_top > 0:
+        vals, counts = np.unique(label_ids, return_counts=True)
+        pairs = [
+            (int(v), int(c))
+            for v, c in zip(vals.tolist(), counts.tolist(), strict=False)
+            if int(v) != 0 and int(c) >= int(args.structures_min_voxels)
+        ]
+        pairs.sort(key=lambda p: p[1], reverse=True)
+        requested.extend([v for v, _ in pairs[: int(args.structures_top)]])
+    # De-dupe while preserving order.
+    seen: set[int] = set()
+    requested_unique: list[int] = []
+    for lid in requested:
+        if lid in seen:
+            continue
+        seen.add(lid)
+        requested_unique.append(lid)
+
+    if requested_unique:
+        structures = export_structure_glbs(
+            label_ids,
+            voxel_spacing_mm,
+            output_dir,
+            structure_label_ids=requested_unique,
+            label_name_by_id=label_name_by_id,
+        )
+    else:
+        # Default behaviour: export curated important structures unless explicitly disabled by providing other selectors.
+        if args.structures_important or (not args.structures_top and not args.structures):
+            structures = export_structure_glbs_from_specs(
+                label_ids,
+                voxel_spacing_mm,
+                output_dir,
+                specs=important_structures(),
+                label_name_by_id=label_name_by_id,
+            )
+
+    manifest = build_manifest(
+        subject_folder, t1_voxels, voxel_spacing_mm, slice_meta, structures=structures
+    )
     manifest_path = output_dir / "manifest.json"
     write_manifest(manifest, manifest_path)
 

@@ -65,6 +65,7 @@ const el = {
   obliqueOffset: document.getElementById("obliqueOffset"),
   obliqueOffsetLabel: document.getElementById("obliqueOffsetLabel"),
   resetOblique: document.getElementById("resetOblique"),
+  structureControls: document.getElementById("structureControls"),
 };
 
 function setStatus(text, isError = false) {
@@ -274,11 +275,136 @@ function applyClippingToBrain() {
       mat.clippingPlanes = [clipPlane];
       mat.clipIntersection = false;
       mat.side = THREE.DoubleSide;
+      mat.userData = { ...(mat.userData || {}), neuroLensBrainCloned: true };
+      // Remember base opacity so see-through can restore it.
+      if (mat.userData.neuroLensBaseOpacity == null) {
+        mat.userData.neuroLensBaseOpacity = typeof mat.opacity === "number" ? mat.opacity : 1.0;
+        mat.userData.neuroLensBaseTransparent = !!mat.transparent;
+      }
       if (Array.isArray(obj.material)) obj.material[i] = mat;
       else obj.material = mat;
     });
   });
   brainRoot.userData.neuroLensClipReady = true;
+}
+
+function applyBrainSeeThroughMode() {
+  if (!brainRoot) return;
+  brainRoot.traverse((obj) => {
+    if (!obj.isMesh || !obj.material) return;
+    const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+    mats.forEach((m) => {
+      if (!m) return;
+      if (!m.userData) m.userData = {};
+      const baseOpacity = m.userData.neuroLensBaseOpacity ?? 1.0;
+      const baseTransparent = m.userData.neuroLensBaseTransparent ?? false;
+      if (brainSeeThrough) {
+        m.transparent = true;
+        m.opacity = BRAIN_SEE_THROUGH_OPACITY;
+        // Don't write depth so structures remain visible underneath.
+        m.depthWrite = false;
+      } else {
+        m.opacity = baseOpacity;
+        m.transparent = baseTransparent;
+        m.depthWrite = true;
+      }
+      m.needsUpdate = true;
+    });
+  });
+
+  // Fade slice PNGs (3D sheet + 2D preview) alongside the brain surface.
+  if (sliceSheet && sliceSheet.material) {
+    sliceSheet.material.transparent = true;
+    sliceSheet.material.opacity = brainSeeThrough ? SLICE_SEE_THROUGH_OPACITY : 1.0;
+    sliceSheet.material.needsUpdate = true;
+  }
+  if (el.slice) {
+    el.slice.style.opacity = brainSeeThrough ? String(SLICE_SEE_THROUGH_OPACITY) : "1";
+  }
+}
+
+function buildStructureControls() {
+  if (!el.structureControls) return;
+  const list = Array.isArray(manifest?.structures) ? manifest.structures : [];
+  el.structureControls.innerHTML = "";
+  structureState.roots.forEach((_, key) => unloadStructure(key));
+  structureState.specs.clear();
+
+  if (list.length === 0) {
+    el.structureControls.hidden = true;
+    return;
+  }
+
+  // Normalize + stable sort: by label then by id.
+  const specs = list
+    .filter((s) => s && typeof s === "object" && s.id && s.meshUrl)
+    .map((s) => ({
+      id: String(s.id),
+      label: String(s.label ?? s.id),
+      meshUrl: String(s.meshUrl),
+      sourceLabelId: s.sourceLabelId,
+    }))
+    .sort((a, b) => (a.label.localeCompare(b.label) || a.id.localeCompare(b.id)));
+
+  specs.forEach((s) => structureState.specs.set(s.id, s));
+
+  const title = document.createElement("span");
+  title.textContent = "Structures";
+  title.style.color = "var(--muted)";
+  title.style.fontSize = "0.9rem";
+  el.structureControls.appendChild(title);
+
+  // See-through mode: fade the outer brain surface (structures stay unchanged).
+  const seeThroughLabel = document.createElement("label");
+  seeThroughLabel.className = "structure-toggle";
+  seeThroughLabel.title =
+    "When enabled, the brain surface fades so structures remain visible underneath.";
+  const seeThroughCb = document.createElement("input");
+  seeThroughCb.type = "checkbox";
+  seeThroughCb.checked = brainSeeThrough;
+  seeThroughCb.addEventListener("change", () => {
+    brainSeeThrough = seeThroughCb.checked;
+    applyBrainSeeThroughMode();
+  });
+  const seeThroughText = document.createElement("span");
+  seeThroughText.textContent = "See-through brain";
+  seeThroughLabel.appendChild(seeThroughCb);
+  seeThroughLabel.appendChild(seeThroughText);
+  el.structureControls.appendChild(seeThroughLabel);
+
+  for (const s of specs) {
+    const labelEl = document.createElement("label");
+    labelEl.className = "structure-toggle";
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = false;
+    cb.addEventListener("change", async () => {
+      if (!scene || !volumeRoot) return;
+      if (cb.checked) {
+        try {
+          await ensureStructureLoaded(s.id);
+          setClipPlaneForActiveAxis();
+          layoutSliceSheet();
+        } catch {
+          cb.checked = false;
+          setStatus(`Failed to load structure: ${s.label}`, true);
+        }
+      } else {
+        unloadStructure(s.id);
+      }
+    });
+    const text = document.createElement("span");
+    text.textContent = s.label;
+    labelEl.title =
+      typeof s.sourceLabelId === "number"
+        ? `Label id ${s.sourceLabelId}`
+        : String(s.id);
+    labelEl.appendChild(cb);
+    labelEl.appendChild(text);
+    el.structureControls.appendChild(labelEl);
+  }
+
+  el.structureControls.hidden = false;
 }
 
 function layoutSliceSheet() {
@@ -366,6 +492,8 @@ function buildSliceSheetMaterial(tex) {
     transparent: true,
     toneMapped: false,
   });
+  // If the brain is in see-through mode, keep the slice sheet slightly faded too.
+  mat.opacity = brainSeeThrough ? SLICE_SEE_THROUGH_OPACITY : 1.0;
   mat.onBeforeCompile = (shader) => {
     shader.fragmentShader = shader.fragmentShader.replace(
       "#include <opaque_fragment>",
@@ -623,6 +751,138 @@ function loadBrainGlb(url) {
   });
 }
 
+function disposeObject3D(root) {
+  if (!root) return;
+  root.traverse((o) => {
+    if (o.geometry) o.geometry.dispose();
+    if (o.material) {
+      const mats = Array.isArray(o.material) ? o.material : [o.material];
+      mats.forEach((m) => {
+        if (!m) return;
+        if (m.map) m.map.dispose();
+        m.dispose();
+      });
+    }
+  });
+}
+
+function applyClippingToRoot(root) {
+  if (!root) return;
+  root.traverse((obj) => {
+    if (!obj.isMesh) return;
+    const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+    mats.forEach((m, i) => {
+      if (!m) return;
+      const mat = m.clone();
+      mat.clippingPlanes = [clipPlane];
+      mat.clipIntersection = false;
+      mat.side = THREE.DoubleSide;
+      if (Array.isArray(obj.material)) obj.material[i] = mat;
+      else obj.material = mat;
+    });
+  });
+}
+
+const structureState = {
+  /** @type {Map<string, THREE.Object3D>} */
+  roots: new Map(),
+  /** @type {Map<string, any>} */
+  specs: new Map(),
+};
+
+let brainSeeThrough = false;
+const BRAIN_SEE_THROUGH_OPACITY = 0.12;
+const SLICE_SEE_THROUGH_OPACITY = 0.55;
+
+function structureColor(structureId) {
+  // Stable, bright-ish hash color for visibility.
+  let h = 2166136261;
+  for (let i = 0; i < structureId.length; i++) {
+    h ^= structureId.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  // Map to HSV-ish then to RGB with decent saturation/value.
+  const hue = ((h >>> 0) % 360) / 360;
+  const col = new THREE.Color().setHSL(hue, 0.85, 0.6);
+  return col;
+}
+
+function applyStructureMaterialMode(root) {
+  // Structures are always rendered with a stable solid material.
+  // "See-through" is implemented by fading the brain surface, not by mutating structure materials.
+  if (!root) return;
+  root.traverse((o) => {
+    if (!o.isMesh || !o.material) return;
+    o.frustumCulled = false;
+    o.renderOrder = 25;
+    const mats = Array.isArray(o.material) ? o.material : [o.material];
+    mats.forEach((m) => {
+      if (!m) return;
+      m.transparent = false;
+      m.opacity = 1.0;
+      m.depthTest = true;
+      m.depthWrite = true;
+      m.side = THREE.DoubleSide;
+      m.blending = THREE.NormalBlending;
+      m.polygonOffset = true;
+      m.polygonOffsetFactor = -2;
+      m.polygonOffsetUnits = -2;
+      m.needsUpdate = true;
+    });
+  });
+}
+
+async function ensureStructureLoaded(structureId) {
+  if (!volumeRoot || !manifest) return null;
+  if (structureState.roots.has(structureId)) return structureState.roots.get(structureId);
+  const spec = structureState.specs.get(structureId);
+  if (!spec || !spec.meshUrl) return null;
+  const root = await loadBrainGlb(spec.meshUrl);
+  alignBrainToVolumeGrid(root);
+  // Make structures visually distinct: solid tint (applied below).
+  const baseColor = structureColor(structureId);
+  let meshCount = 0;
+  root.traverse((o) => {
+    if (!o.isMesh || !o.material) return;
+    meshCount += 1;
+    // Replace imported materials entirely to avoid weird alpha/texture modes.
+    const oldMats = Array.isArray(o.material) ? o.material : [o.material];
+    oldMats.forEach((m) => m?.dispose?.());
+
+    const makeMat = () =>
+      new THREE.MeshStandardMaterial({
+        color: baseColor,
+        roughness: 0.48,
+        metalness: 0.0,
+        emissive: baseColor.clone().multiplyScalar(0.22),
+        emissiveIntensity: 1.0,
+      });
+
+    // Preserve array-ness if the mesh had multiple materials.
+    if (Array.isArray(o.material)) {
+      o.material = oldMats.map(() => makeMat());
+    } else {
+      o.material = makeMat();
+    }
+  });
+  // Structures should not disappear when the brain is clipped, so do NOT apply the clip plane.
+  applyStructureMaterialMode(root);
+  volumeRoot.add(root);
+  structureState.roots.set(structureId, root);
+  if (meshCount === 0) {
+    setStatus(`Structure loaded but contained no meshes: ${spec.label ?? structureId}`, true);
+  }
+  return root;
+}
+
+function unloadStructure(structureId) {
+  const root = structureState.roots.get(structureId);
+  if (!root || !volumeRoot) return;
+  volumeRoot.remove(root);
+  disposeObject3D(root);
+  structureState.roots.delete(structureId);
+}
+
 async function attachBrain() {
   const url = manifest.mesh && manifest.mesh.wholeBrainUrl;
   if (!url) {
@@ -632,16 +892,7 @@ async function attachBrain() {
   try {
     if (brainRoot) {
       volumeRoot.remove(brainRoot);
-      brainRoot.traverse((o) => {
-        if (o.geometry) o.geometry.dispose();
-        if (o.material) {
-          const ms = Array.isArray(o.material) ? o.material : [o.material];
-          ms.forEach((m) => {
-            if (m.map) m.map.dispose();
-            m.dispose();
-          });
-        }
-      });
+      disposeObject3D(brainRoot);
       brainRoot = null;
     }
     brainRoot = await loadBrainGlb(url);
@@ -649,6 +900,7 @@ async function attachBrain() {
     volumeRoot.add(brainRoot);
     setClipPlaneForActiveAxis();
     applyClippingToBrain();
+    applyBrainSeeThroughMode();
     setStatus("Drag to orbit · slider moves the cut");
   } catch (e) {
     setStatus("Could not load brain GLB.", true);
@@ -666,6 +918,10 @@ function applyPlane() {
   if (!oblique_ && obliquePngRafId) {
     cancelAnimationFrame(obliquePngRafId);
     obliquePngRafId = 0;
+  }
+  if (!oblique_ && obliquePngTimerId) {
+    clearTimeout(obliquePngTimerId);
+    obliquePngTimerId = 0;
   }
 
   if (oblique_) {
@@ -728,8 +984,15 @@ function resetOblique() {
 
 /** Coalesce oblique PNG updates to ~one per animation frame while dragging. */
 let obliquePngRafId = 0;
+let obliquePngTimerId = 0;
+let lastObliquePngRequestMs = 0;
+// Throttle oblique PNG fetch/decode/texture-upload to reduce UI stutter.
+// Geometry updates (clip plane + sheet pose) remain immediate.
+const OBLIQUE_PNG_MAX_FPS = 15;
+const OBLIQUE_PNG_MIN_INTERVAL_MS = Math.round(1000 / OBLIQUE_PNG_MAX_FPS);
 function flushObliquePngRefresh() {
   if (!isObliqueActive()) return;
+  lastObliquePngRequestMs = performance.now();
   refresh2D();
   updateSliceSheetTexture();
 }
@@ -740,13 +1003,30 @@ function scheduleObliquePngRefresh(immediate = false) {
       cancelAnimationFrame(obliquePngRafId);
       obliquePngRafId = 0;
     }
+    if (obliquePngTimerId) {
+      clearTimeout(obliquePngTimerId);
+      obliquePngTimerId = 0;
+    }
     flushObliquePngRefresh();
     return;
   }
-  if (obliquePngRafId) return;
+  // If we already have something scheduled, don't queue more.
+  if (obliquePngRafId || obliquePngTimerId) return;
+
+  // Always wait at least one animation frame so rapid slider changes coalesce.
   obliquePngRafId = requestAnimationFrame(() => {
     obliquePngRafId = 0;
-    flushObliquePngRefresh();
+    const now = performance.now();
+    const since = now - lastObliquePngRequestMs;
+    const waitMs = Math.max(0, OBLIQUE_PNG_MIN_INTERVAL_MS - since);
+    if (waitMs <= 0) {
+      flushObliquePngRefresh();
+      return;
+    }
+    obliquePngTimerId = setTimeout(() => {
+      obliquePngTimerId = 0;
+      flushObliquePngRefresh();
+    }, waitMs);
   });
 }
 
@@ -832,6 +1112,7 @@ async function init() {
   syncSliderFromState();
   refresh2D();
   setClipPlaneForActiveAxis();
+  buildStructureControls();
   await attachBrain();
   layoutSliceSheet();
   await updateSliceSheetTexture();
