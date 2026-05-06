@@ -70,6 +70,24 @@ def main() -> None:
         action="store_true",
         help="Export a curated set of important subcortical structures (default if no other --structures* flags are provided).",
     )
+    parser.add_argument(
+        "--brain-target-faces",
+        type=int,
+        default=150_000,
+        help="Target triangle faces for outputs/mesh/brain.glb (0 disables decimation).",
+    )
+    parser.add_argument(
+        "--structure-target-faces",
+        type=int,
+        default=20_000,
+        help="Target triangle faces per structure GLB (0 disables decimation).",
+    )
+    parser.add_argument(
+        "--mesh-smooth-sigma",
+        type=float,
+        default=0.8,
+        help="Gaussian smoothing sigma in voxels applied to masks before meshing (0 disables).",
+    )
     args = parser.parse_args()
 
     t1_path, labels_path, subject_folder = require_existing_paths(args.subject)
@@ -97,7 +115,13 @@ def main() -> None:
     volume_npy_path = output_dir / "volume.npy"
     np.save(volume_npy_path, volume_u8, allow_pickle=False)
 
-    export_brain_glb(label_ids > 0, voxel_spacing_mm, output_dir / "mesh" / "brain.glb")
+    export_brain_glb(
+        label_ids > 0,
+        voxel_spacing_mm,
+        output_dir / "mesh" / "brain.glb",
+        smooth_sigma_vox=float(args.mesh_smooth_sigma),
+        target_faces=int(args.brain_target_faces) if int(args.brain_target_faces) > 0 else None,
+    )
 
     structures: list[dict] = []
     # Optional label id -> name mapping for friendlier structure labels.
@@ -133,6 +157,10 @@ def main() -> None:
             output_dir,
             structure_label_ids=requested_unique,
             label_name_by_id=label_name_by_id,
+            smooth_sigma_vox=float(args.mesh_smooth_sigma),
+            target_faces=int(args.structure_target_faces)
+            if int(args.structure_target_faces) > 0
+            else None,
         )
     else:
         # Default behaviour: export curated important structures unless explicitly disabled by providing other selectors.
@@ -143,6 +171,10 @@ def main() -> None:
                 output_dir,
                 specs=important_structures(),
                 label_name_by_id=label_name_by_id,
+                smooth_sigma_vox=float(args.mesh_smooth_sigma),
+                target_faces=int(args.structure_target_faces)
+                if int(args.structure_target_faces) > 0
+                else None,
             )
 
     manifest = build_manifest(
